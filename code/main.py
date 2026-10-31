@@ -2,12 +2,12 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import io
 
-# -----------------------------------------
+# =========================================
 # 1. 기본 설정
-# -----------------------------------------
+# =========================================
+
 st.set_page_config(
     page_title="공공자전거 기초통계분석",
     page_icon="🚲",
@@ -20,54 +20,42 @@ DATA_URL = (
 )
 
 st.title("🚲 공공자전거 데이터 기초통계분석")
+
 st.write(
-    "서울 공공자전거 대여량과 날씨 데이터를 이용하여 "
-    "데이터의 특징과 변수 사이의 관계를 분석합니다."
+    "기온과 시간대에 따른 서울 공공자전거 대여량 데이터를 "
+    "활용하여 기초통계분석을 진행합니다."
 )
 
-# -----------------------------------------
+# =========================================
 # 2. 데이터 불러오기
-# -----------------------------------------
+# =========================================
+
 @st.cache_data
 def load_online_data():
-    df = pd.read_csv(
+    return pd.read_csv(
         DATA_URL,
         sep=";",
         encoding="unicode_escape"
     )
-
-    if df.shape[1] == 1:
-        df = pd.read_csv(
-            DATA_URL,
-            encoding="utf-8-sig"
-        )
-
-    return df
 
 
 def load_uploaded_data(uploaded_file):
     raw = uploaded_file.getvalue()
 
     for encoding in ["utf-8-sig", "cp949", "unicode_escape"]:
-        try:
-            data = pd.read_csv(
-                io.BytesIO(raw),
-                sep=None,
-                engine="python",
-                encoding=encoding
-            )
-
-            if data.shape[1] == 1:
+        for separator in [";", ","]:
+            try:
                 data = pd.read_csv(
                     io.BytesIO(raw),
-                    sep=";",
+                    sep=separator,
                     encoding=encoding
                 )
 
-            return data
+                if data.shape[1] > 1:
+                    return data
 
-        except Exception:
-            continue
+            except Exception:
+                continue
 
     raise ValueError("CSV 파일을 읽을 수 없습니다.")
 
@@ -84,41 +72,76 @@ if uploaded_file is not None:
     try:
         df = load_uploaded_data(uploaded_file)
         st.sidebar.success("업로드한 데이터를 불러왔습니다.")
+
     except Exception as e:
         st.error(f"데이터 불러오기 오류: {e}")
         st.stop()
+
 else:
     try:
         df = load_online_data()
         st.sidebar.success("GitHub 데이터를 불러왔습니다.")
+
     except Exception as e:
-        st.error(f"데이터를 불러오지 못했습니다: {e}")
+        st.error(f"GitHub 데이터 불러오기 실패: {e}")
         st.stop()
+
+
+# =========================================
+# 3. 데이터 전처리
+# =========================================
 
 df.columns = df.columns.astype(str).str.strip()
 
-# -----------------------------------------
-# 3. 데이터 전처리
-# -----------------------------------------
+# 중복된 열 이름 방지
+seen = {}
+new_columns = []
+
+for col in df.columns:
+    if col in seen:
+        seen[col] += 1
+        new_columns.append(f"{col}_{seen[col]}")
+    else:
+        seen[col] = 0
+        new_columns.append(col)
+
+df.columns = new_columns
+
+# 수치형 데이터 변환
 for col in df.columns:
     if col.strip().lower() != "date":
-        converted = pd.to_numeric(df[col], errors="coerce")
+        converted = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
 
         non_missing = df[col].notna().sum()
 
         if non_missing > 0:
-            rate = converted.notna().sum() / non_missing
+            conversion_rate = (
+                converted.notna().sum() / non_missing
+            )
 
-            if rate >= 0.8:
+            if conversion_rate >= 0.8:
                 df[col] = converted
 
-numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
+numeric_cols = df.select_dtypes(
+    include="number"
+).columns.tolist()
+
+
+# =========================================
+# 4. 주요 변수 찾기
+# =========================================
 
 def find_column(possible_names):
+
     for col in df.columns:
+
         normalized = (
-            str(col).lower()
+            str(col)
+            .lower()
             .replace(" ", "")
             .replace("_", "")
         )
@@ -139,8 +162,7 @@ rental_col = find_column([
 
 hour_col = find_column([
     "hour",
-    "시간대",
-    "시간"
+    "시간대"
 ])
 
 temp_col = find_column([
@@ -149,45 +171,80 @@ temp_col = find_column([
     "온도"
 ])
 
-# -----------------------------------------
-# 4. 데이터 기본 정보
-# -----------------------------------------
+
+# =========================================
+# 5. 데이터 기본 정보
+# =========================================
+
 st.header("1. 데이터 기본 정보")
 
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("전체 행 수", f"{len(df):,}개")
-col2.metric("전체 열 수", f"{len(df.columns):,}개")
-col3.metric("수치형 변수 수", f"{len(numeric_cols):,}개")
-col4.metric("전체 결측값", f"{int(df.isna().sum().sum()):,}개")
+col1.metric(
+    "전체 행 수",
+    f"{len(df):,}개"
+)
 
-with st.expander("데이터 열 이름 확인"):
+col2.metric(
+    "전체 열 수",
+    f"{len(df.columns):,}개"
+)
+
+col3.metric(
+    "수치형 변수 수",
+    f"{len(numeric_cols):,}개"
+)
+
+col4.metric(
+    "전체 결측값",
+    f"{int(df.isna().sum().sum()):,}개"
+)
+
+with st.expander("데이터 열 이름 확인하기"):
     st.write(df.columns.tolist())
 
-st.subheader("데이터 미리보기")
-st.dataframe(df.head(10), use_container_width=True)
 
-st.subheader("열별 데이터 유형")
+st.subheader("데이터 미리보기")
+
+st.dataframe(
+    df.head(10),
+    use_container_width=True
+)
+
+
+st.subheader("열별 데이터 정보")
 
 type_df = pd.DataFrame({
     "열 이름": df.columns,
-    "데이터 유형": [str(df[col].dtype) for col in df.columns],
-    "결측값 수": [int(df[col].isna().sum()) for col in df.columns],
-    "고유값 수": [int(df[col].nunique()) for col in df.columns]
+    "데이터 유형": [
+        str(df[col].dtype) for col in df.columns
+    ],
+    "결측값 수": [
+        int(df[col].isna().sum()) for col in df.columns
+    ],
+    "고유값 수": [
+        int(df[col].nunique()) for col in df.columns
+    ]
 })
 
-st.dataframe(type_df, use_container_width=True)
+st.dataframe(
+    type_df,
+    use_container_width=True,
+    hide_index=True
+)
 
-# -----------------------------------------
-# 5. 기초통계량 분석
-# -----------------------------------------
+
+# =========================================
+# 6. 기초통계량 분석
+# =========================================
+
 st.header("2. 기초통계량 분석")
 
 if numeric_cols:
 
     selected_stats_cols = st.multiselect(
         "통계량을 확인할 변수 선택",
-        numeric_cols,
+        options=numeric_cols,
         default=numeric_cols
     )
 
@@ -195,28 +252,51 @@ if numeric_cols:
 
         stats = df[selected_stats_cols].describe().T
 
-        stats["중앙값"] = df[selected_stats_cols].median()
-        stats["결측값 수"] = df[selected_stats_cols].isna().sum()
+        # 중앙값 추가
+        stats["중앙값"] = (
+            df[selected_stats_cols].median()
+        )
 
+        # 결측값 수 추가
+        stats["결측값 수"] = (
+            df[selected_stats_cols].isna().sum()
+        )
+
+        # 열 이름 변경
         stats = stats.rename(columns={
             "count": "데이터 수",
             "mean": "평균",
             "std": "표준편차",
             "min": "최솟값",
             "25%": "제1사분위수",
-            "50%": "중앙값",
             "75%": "제3사분위수",
             "max": "최댓값"
         })
 
+        # 50% 열은 중앙값과 같은 값이므로 제거
+        if "50%" in stats.columns:
+            stats = stats.drop(columns=["50%"])
+
+        # 표의 인덱스를 변수 이름으로 변경
+        stats.index.name = "변수"
+        stats = stats.reset_index()
+
+        # 중복 열 이름 최종 확인
+        stats = stats.loc[
+            :,
+            ~stats.columns.duplicated()
+        ]
+
         st.dataframe(
             stats.round(2),
-            use_container_width=True
+            use_container_width=True,
+            hide_index=True
         )
 
         st.download_button(
             "📥 기초통계량 CSV 다운로드",
             data=stats.to_csv(
+                index=False,
                 encoding="utf-8-sig"
             ).encode("utf-8-sig"),
             file_name="기초통계량.csv",
@@ -226,9 +306,14 @@ if numeric_cols:
     else:
         st.info("분석할 변수를 선택해 주세요.")
 
-# -----------------------------------------
-# 6. 결측값 분석
-# -----------------------------------------
+else:
+    st.warning("수치형 변수가 없습니다.")
+
+
+# =========================================
+# 7. 결측값 분석
+# =========================================
+
 st.header("3. 결측값 분석")
 
 missing_df = pd.DataFrame({
@@ -239,11 +324,18 @@ missing_df = pd.DataFrame({
     ).round(2)
 })
 
-st.dataframe(missing_df, use_container_width=True)
+st.dataframe(
+    missing_df,
+    use_container_width=True,
+    hide_index=True
+)
 
 if df.isna().sum().sum() == 0:
-    st.success("결측값이 없습니다.")
+
+    st.success("전체 데이터에 결측값이 없습니다.")
+
 else:
+
     fig = px.bar(
         missing_df,
         x="변수",
@@ -257,11 +349,16 @@ else:
         yaxis_title="결측값 수"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-# -----------------------------------------
-# 7. 변수 분포 분석
-# -----------------------------------------
+
+# =========================================
+# 8. 변수 분포 분석
+# =========================================
+
 st.header("4. 변수 분포 분석")
 
 if numeric_cols:
@@ -281,6 +378,7 @@ if numeric_cols:
     col1, col2 = st.columns(2)
 
     with col1:
+
         fig = px.histogram(
             plot_data,
             x=distribution_col,
@@ -293,9 +391,13 @@ if numeric_cols:
             yaxis_title="빈도"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
     with col2:
+
         fig = px.box(
             plot_data,
             y=distribution_col,
@@ -306,11 +408,19 @@ if numeric_cols:
             yaxis_title=distribution_col
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
-# -----------------------------------------
-# 8. 시간대별 공공자전거 대여량
-# -----------------------------------------
+else:
+    st.warning("분석할 수 있는 수치형 변수가 없습니다.")
+
+
+# =========================================
+# 9. 시간대별 공공자전거 대여량
+# =========================================
+
 st.header("5. 시간대별 공공자전거 대여량")
 
 if hour_col and rental_col:
@@ -342,12 +452,17 @@ if hour_col and rental_col:
         yaxis_title="평균 대여량"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     st.subheader("시간대별 통계")
+
     st.dataframe(
         hourly.round(2),
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True
     )
 
     max_hour = hourly.loc[
@@ -373,11 +488,16 @@ if hour_col and rental_col:
     )
 
 else:
-    st.warning("시간대 또는 대여량 변수를 찾을 수 없습니다.")
 
-# -----------------------------------------
-# 9. 기온과 대여량의 관계
-# -----------------------------------------
+    st.warning(
+        "시간대 또는 대여량 변수를 찾을 수 없습니다."
+    )
+
+
+# =========================================
+# 10. 기온과 대여량의 관계
+# =========================================
+
 st.header("6. 기온과 대여량의 관계")
 
 if temp_col and rental_col:
@@ -410,20 +530,30 @@ if temp_col and rental_col:
             yaxis_title="대여량"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
         if corr > 0:
+
             st.write(
                 "양의 상관관계가 나타납니다. "
-                "기온이 높아질수록 대여량이 증가하는 경향이 있습니다."
+                "기온이 높을수록 대여량이 증가하는 경향이 있습니다."
             )
+
         elif corr < 0:
+
             st.write(
                 "음의 상관관계가 나타납니다. "
-                "기온이 높아질수록 대여량이 감소하는 경향이 있습니다."
+                "기온이 높을수록 대여량이 감소하는 경향이 있습니다."
             )
+
         else:
-            st.write("선형 상관관계가 거의 나타나지 않습니다.")
+
+            st.write(
+                "두 변수 사이에 선형 상관관계가 거의 없습니다."
+            )
 
         st.caption(
             "상관관계만으로 기온이 대여량 변화의 원인이라고 "
@@ -431,11 +561,16 @@ if temp_col and rental_col:
         )
 
 else:
-    st.warning("기온 또는 대여량 변수를 찾을 수 없습니다.")
 
-# -----------------------------------------
-# 10. 수치형 변수 사이의 상관관계
-# -----------------------------------------
+    st.warning(
+        "기온 또는 대여량 변수를 찾을 수 없습니다."
+    )
+
+
+# =========================================
+# 11. 수치형 변수 상관관계 분석
+# =========================================
+
 st.header("7. 수치형 변수 사이의 상관관계")
 
 if len(numeric_cols) >= 2:
@@ -452,9 +587,13 @@ if len(numeric_cols) >= 2:
         title="수치형 변수 상관관계 히트맵"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     st.subheader("상관관계 표")
+
     st.dataframe(
         corr_matrix.round(2),
         use_container_width=True
@@ -465,6 +604,7 @@ if len(numeric_cols) >= 2:
     col1, col2 = st.columns(2)
 
     with col1:
+
         x_col = st.selectbox(
             "X축 변수",
             numeric_cols,
@@ -472,18 +612,21 @@ if len(numeric_cols) >= 2:
                 numeric_cols.index(temp_col)
                 if temp_col in numeric_cols
                 else 0
-            )
+            ),
+            key="x_variable"
         )
 
     with col2:
+
         y_col = st.selectbox(
             "Y축 변수",
             numeric_cols,
             index=(
                 numeric_cols.index(rental_col)
                 if rental_col in numeric_cols
-                else 1
-            )
+                else min(1, len(numeric_cols) - 1)
+            ),
+            key="y_variable"
         )
 
     if x_col != y_col:
@@ -492,31 +635,43 @@ if len(numeric_cols) >= 2:
             [x_col, y_col]
         ].dropna()
 
-        pair_corr = pair_df[x_col].corr(
-            pair_df[y_col]
-        )
+        if len(pair_df) > 1:
 
-        st.metric(
-            "선택한 두 변수의 상관계수",
-            f"{pair_corr:.3f}"
-        )
+            pair_corr = pair_df[x_col].corr(
+                pair_df[y_col]
+            )
 
-        fig = px.scatter(
-            pair_df,
-            x=x_col,
-            y=y_col,
-            title=f"{x_col}와 {y_col}의 관계",
-            opacity=0.5
-        )
+            st.metric(
+                "선택한 두 변수의 상관계수",
+                f"{pair_corr:.3f}"
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
+            fig = px.scatter(
+                pair_df,
+                x=x_col,
+                y=y_col,
+                title=f"{x_col}와 {y_col}의 관계",
+                opacity=0.5
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True
+            )
 
     else:
+
         st.info("서로 다른 두 변수를 선택해 주세요.")
 
-# -----------------------------------------
-# 11. 데이터 다운로드
-# -----------------------------------------
+else:
+
+    st.info("상관관계 분석에는 수치형 변수가 2개 이상 필요합니다.")
+
+
+# =========================================
+# 12. 데이터 다운로드
+# =========================================
+
 st.header("8. 데이터 다운로드")
 
 st.download_button(
