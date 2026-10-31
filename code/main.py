@@ -690,3 +690,45 @@ st.caption(
     "공공자전거 기초통계분석 | "
     "기온과 시간대에 따른 대여량 분석"
 )
+
+# 대여량 이상치 확인
+if rental_col:
+
+    Q1 = df[rental_col].quantile(0.25)
+    Q3 = df[rental_col].quantile(0.75)
+
+    IQR = Q3 - Q1
+
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
+
+    outliers = df[
+        (df[rental_col] < lower) |
+        (df[rental_col] > upper)
+    ].copy()
+
+    st.header("대여량 이상치 확인")
+
+    st.write(f"이상치 판단 기준 하한: {lower:.2f}")
+    st.write(f"이상치 판단 기준 상한: {upper:.2f}")
+
+    st.write(f"이상치 개수: {len(outliers)}개")
+
+    # 확인에 필요한 열만 표시
+    check_cols = [
+        col for col in [
+            "Date",
+            "Hour",
+            "Rented Bike Count",
+            "Temperature(°C)",
+            "Functioning Day"
+        ]
+        if col in outliers.columns
+    ]
+
+    st.subheader("이상치로 분류된 원본 데이터")
+
+    st.dataframe(
+        outliers[check_cols],
+        use_container_width=True
+    )
