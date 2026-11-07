@@ -9,6 +9,7 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 
+
 # ==========================================
 # 1. 페이지 설정
 # ==========================================
@@ -22,9 +23,10 @@ st.set_page_config(
 st.title("🚲 공공자전거 대여량 예측 프로젝트")
 
 st.write(
-    "기온과 시간대 정보를 활용하여 공공자전거 대여량을 예측하고 "
-    "베이스라인과 세 가지 회귀 모델의 성능을 비교합니다."
+    "기온과 시간대 정보를 활용하여 공공자전거 대여량을 분석하고 "
+    "회귀 모델을 이용해 대여량을 예측합니다."
 )
+
 
 # ==========================================
 # 2. 데이터 불러오기
@@ -35,11 +37,12 @@ DATA_URL = (
     "t2515atat-png/project/main/data/SeoulBikeData.csv"
 )
 
+
 @st.cache_data
 def load_data():
     data = pd.read_csv(
         DATA_URL,
-        encoding="unicode_escape"
+        encoding="latin1"
     )
 
     data.columns = data.columns.str.strip()
@@ -50,6 +53,7 @@ def load_data():
 
 try:
     df = load_data()
+
 except Exception as e:
     st.error("데이터를 불러오지 못했습니다.")
     st.write(e)
@@ -76,25 +80,26 @@ missing_cols = [
 ]
 
 if missing_cols:
-    st.error(f"필요한 데이터 열이 없습니다: {missing_cols}")
+    st.error(f"필요한 열이 없습니다: {missing_cols}")
     st.write("현재 데이터 열 이름:", list(df.columns))
     st.stop()
 
 for col in required_cols:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df[col] = pd.to_numeric(
+        df[col],
+        errors="coerce"
+    )
 
 
 # ==========================================
-# 4. 데이터 전처리
+# 4. 분석용 데이터 및 전처리
 # ==========================================
 
 analysis_df = df[required_cols].copy()
 
-# 결측값 확인
 missing_rows = analysis_df.isnull().any(axis=1).sum()
 missing_values = analysis_df.isnull().sum().sum()
 
-# 필요한 변수의 결측값이 있는 행만 제외
 clean_df = analysis_df.dropna().copy()
 
 # 날짜가 있다면 날짜와 시간 순서로 정렬
@@ -121,16 +126,33 @@ clean_df = clean_df.reset_index(drop=True)
 
 
 # ==========================================
-# 5. 모델 학습 및 평가 함수
+# 5. 메뉴 구성
 # ==========================================
 
-@st.cache_data
+menu = st.sidebar.radio(
+    "분석 메뉴",
+    [
+        "1. 데이터 소개",
+        "2. 기초통계분석",
+        "3. 데이터 탐색 및 시각화",
+        "4. 데이터 속성 간 관계 분석",
+        "5. 데이터 전처리",
+        "6. 모델 학습 및 성능 비교",
+        "7. 최종 결과"
+    ]
+)
+
+
+# ==========================================
+# 6. 모델 학습 함수
+# ==========================================
+
 def train_models(data):
 
     X = data[[temperature_col, hour_col]]
     y = data[rental_col]
 
-    # 시간 순서를 유지한 80:20 분할
+    # 시간 순서를 유지하여 80:20으로 분리
     split_index = int(len(data) * 0.8)
 
     X_train = X.iloc[:split_index]
@@ -139,13 +161,12 @@ def train_models(data):
     y_train = y.iloc[:split_index]
     y_test = y.iloc[split_index:]
 
-    # 베이스라인: 학습 데이터의 평균 대여량
+    # 베이스라인: 학습 데이터 평균으로 예측
     baseline_prediction = np.full(
         len(y_test),
         y_train.mean()
     )
 
-    # 비교할 회귀 모델 3개
     models = {
         "선형 회귀": LinearRegression(),
 
@@ -168,45 +189,37 @@ def train_models(data):
     predictions = {}
 
     # 베이스라인 평가
-    baseline_mae = mean_absolute_error(
-        y_test,
-        baseline_prediction
-    )
-
-    baseline_r2 = r2_score(
-        y_test,
-        baseline_prediction
-    )
-
     results.append({
         "모델": "베이스라인",
-        "MAE": baseline_mae,
-        "R²": baseline_r2
+        "MAE": mean_absolute_error(
+            y_test,
+            baseline_prediction
+        ),
+        "R²": r2_score(
+            y_test,
+            baseline_prediction
+        )
     })
 
     predictions["베이스라인"] = baseline_prediction
 
-    # 세 가지 모델 학습 및 평가
+    # 회귀 모델 3개 학습
     for name, model in models.items():
 
         model.fit(X_train, y_train)
 
         prediction = model.predict(X_test)
 
-        mae = mean_absolute_error(
-            y_test,
-            prediction
-        )
-
-        r2 = r2_score(
-            y_test,
-            prediction
-        )
-
         results.append({
             "모델": name,
-            "MAE": mae,
-            "R²": r2
+            "MAE": mean_absolute_error(
+                y_test,
+                prediction
+            ),
+            "R²": r2_score(
+                y_test,
+                prediction
+            )
         })
 
         predictions[name] = prediction
@@ -216,26 +229,8 @@ def train_models(data):
     return (
         result_df,
         predictions,
-        y_test.reset_index(drop=True),
-        X_train,
-        X_test
+        y_test.reset_index(drop=True)
     )
-
-
-# ==========================================
-# 6. 메뉴 구성
-# ==========================================
-
-menu = st.sidebar.radio(
-    "분석 메뉴",
-    [
-        "1. 데이터 소개",
-        "2. 데이터 탐색 및 시각화",
-        "3. 데이터 전처리",
-        "4. 모델 학습 및 성능 비교",
-        "5. 최종 결과"
-    ]
-)
 
 
 # ==========================================
@@ -290,7 +285,7 @@ if menu == "1. 데이터 소개":
         hide_index=True
     )
 
-    st.subheader("결측값 확인")
+    st.subheader("전체 데이터의 결측값")
 
     st.dataframe(
         df.isnull().sum().to_frame("결측값 개수"),
@@ -299,14 +294,18 @@ if menu == "1. 데이터 소개":
 
 
 # ==========================================
-# 8. 데이터 탐색 및 시각화
+# 8. 기초통계분석
 # ==========================================
 
-elif menu == "2. 데이터 탐색 및 시각화":
+elif menu == "2. 기초통계분석":
 
-    st.header("📊 데이터 탐색 및 시각화")
+    st.header("📈 기초통계분석")
 
-    st.subheader("① 기초통계량")
+    st.write(
+        "기온, 시간대, 자전거 대여량의 기본적인 통계량을 확인합니다."
+    )
+
+    st.subheader("① 주요 기초통계량")
 
     stats = analysis_df.describe().T
 
@@ -322,7 +321,10 @@ elif menu == "2. 데이터 탐색 및 시각화":
         "max": "최댓값"
     })
 
-    stats = stats.drop(columns=["50%"], errors="ignore")
+    stats = stats.drop(
+        columns=["50%"],
+        errors="ignore"
+    )
 
     st.dataframe(
         stats.round(2),
@@ -331,15 +333,76 @@ elif menu == "2. 데이터 탐색 및 시각화":
 
     st.divider()
 
-    st.subheader("② 데이터 분포 확인")
+    st.subheader("② 변수별 통계량 확인")
 
     selected_col = st.selectbox(
-        "분포를 확인할 속성",
+        "분석할 변수를 선택하세요.",
+        required_cols
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "평균",
+        f"{analysis_df[selected_col].mean():,.2f}"
+    )
+
+    col2.metric(
+        "중앙값",
+        f"{analysis_df[selected_col].median():,.2f}"
+    )
+
+    col3.metric(
+        "표준편차",
+        f"{analysis_df[selected_col].std():,.2f}"
+    )
+
+    col4, col5, col6 = st.columns(3)
+
+    col4.metric(
+        "최솟값",
+        f"{analysis_df[selected_col].min():,.2f}"
+    )
+
+    col5.metric(
+        "최댓값",
+        f"{analysis_df[selected_col].max():,.2f}"
+    )
+
+    col6.metric(
+        "데이터 개수",
+        f"{analysis_df[selected_col].count():,}개"
+    )
+
+    st.divider()
+
+    st.subheader("③ 기초통계량의 의미")
+
+    st.write("""
+    - 평균: 전체 데이터의 합을 데이터 개수로 나눈 값
+    - 중앙값: 데이터를 크기순으로 나열했을 때 가운데에 위치하는 값
+    - 표준편차: 데이터가 평균을 중심으로 얼마나 퍼져 있는지 나타내는 값
+    - 최솟값과 최댓값: 데이터에서 가장 작은 값과 가장 큰 값
+    """)
+
+
+# ==========================================
+# 9. 데이터 탐색 및 시각화
+# ==========================================
+
+elif menu == "3. 데이터 탐색 및 시각화":
+
+    st.header("📊 데이터 탐색 및 시각화")
+
+    st.subheader("① 히스토그램")
+
+    selected_col = st.selectbox(
+        "분포를 확인할 변수",
         required_cols
     )
 
     fig_hist = px.histogram(
-        df,
+        analysis_df,
         x=selected_col,
         nbins=30,
         title=f"{selected_col} 분포"
@@ -350,8 +413,12 @@ elif menu == "2. 데이터 탐색 및 시각화":
         use_container_width=True
     )
 
+    st.divider()
+
+    st.subheader("② 상자그림")
+
     fig_box = px.box(
-        df,
+        analysis_df,
         y=selected_col,
         title=f"{selected_col} 상자그림"
     )
@@ -363,9 +430,30 @@ elif menu == "2. 데이터 탐색 및 시각화":
 
     st.divider()
 
-    st.subheader("③ 기온과 자전거 대여량의 관계")
+    st.subheader("③ 데이터 분포 해석")
 
-    fig_scatter = px.scatter(
+    st.write(
+        "히스토그램을 통해 데이터가 어느 구간에 많이 분포하는지 "
+        "확인할 수 있으며, 상자그림을 통해 중앙값과 데이터의 퍼짐, "
+        "통계적 이상치를 확인할 수 있습니다."
+    )
+
+
+# ==========================================
+# 10. 데이터 속성 간 관계 분석
+# ==========================================
+
+elif menu == "4. 데이터 속성 간 관계 분석":
+
+    st.header("🔍 데이터 속성 간 관계 분석")
+
+    st.write(
+        "기온과 시간대가 자전거 대여량과 어떤 관계를 가지는지 확인합니다."
+    )
+
+    st.subheader("① 기온과 대여량의 관계")
+
+    fig_temp = px.scatter(
         clean_df,
         x=temperature_col,
         y=rental_col,
@@ -374,7 +462,7 @@ elif menu == "2. 데이터 탐색 및 시각화":
     )
 
     st.plotly_chart(
-        fig_scatter,
+        fig_temp,
         use_container_width=True
     )
 
@@ -383,13 +471,19 @@ elif menu == "2. 데이터 탐색 및 시각화":
     )
 
     st.metric(
-        "피어슨 상관계수",
+        "기온과 대여량의 피어슨 상관계수",
         f"{corr:.3f}"
+    )
+
+    st.write(
+        "상관계수는 두 변수 사이의 선형적인 관계를 나타냅니다. "
+        "0에 가까우면 선형 관계가 약하고, 1 또는 -1에 가까우면 "
+        "선형 관계가 강합니다."
     )
 
     st.divider()
 
-    st.subheader("④ 시간대별 평균 대여량")
+    st.subheader("② 시간대별 평균 대여량")
 
     hourly_avg = (
         clean_df.groupby(hour_col)[rental_col]
@@ -401,7 +495,11 @@ elif menu == "2. 데이터 탐색 및 시각화":
         hourly_avg,
         x=hour_col,
         y=rental_col,
-        title="시간대별 평균 자전거 대여량"
+        title="시간대별 평균 자전거 대여량",
+        labels={
+            hour_col: "시간",
+            rental_col: "평균 대여량"
+        }
     )
 
     st.plotly_chart(
@@ -409,12 +507,17 @@ elif menu == "2. 데이터 탐색 및 시각화":
         use_container_width=True
     )
 
+    st.write(
+        "시간대별 평균 대여량을 비교하여 자전거 이용이 많은 시간과 "
+        "적은 시간을 확인할 수 있습니다."
+    )
+
 
 # ==========================================
-# 9. 데이터 전처리
+# 11. 데이터 전처리
 # ==========================================
 
-elif menu == "3. 데이터 전처리":
+elif menu == "5. 데이터 전처리":
 
     st.header("🧹 데이터 전처리")
 
@@ -444,9 +547,20 @@ elif menu == "3. 데이터 전처리":
 
     col1, col2, col3 = st.columns(3)
 
-    col1.metric("전처리 전 데이터", f"{len(analysis_df):,}개")
-    col2.metric("결측값 포함 행", f"{missing_rows:,}개")
-    col3.metric("전처리 후 데이터", f"{len(clean_df):,}개")
+    col1.metric(
+        "전처리 전 데이터",
+        f"{len(analysis_df):,}개"
+    )
+
+    col2.metric(
+        "결측값 포함 행",
+        f"{missing_rows:,}개"
+    )
+
+    col3.metric(
+        "전처리 후 데이터",
+        f"{len(clean_df):,}개"
+    )
 
     st.write(
         f"분석에 필요한 세 변수에서 확인된 결측값은 "
@@ -462,7 +576,8 @@ elif menu == "3. 데이터 전처리":
     st.subheader("③ 이상치 처리")
 
     st.write(
-        "대여량에서 통계적 이상치가 확인되었지만 "
+        "대여량에서 통계적 이상치가 확인되었지만, "
+        "이상치가 반드시 잘못된 데이터라는 의미는 아닙니다. "
         "실제 수요 증가로 발생했을 가능성도 있으므로 "
         "임의로 제거하지 않고 유지했습니다."
     )
@@ -475,7 +590,10 @@ elif menu == "3. 데이터 전처리":
 
     col1, col2 = st.columns(2)
 
-    col1.metric("학습용 데이터", f"{split_index:,}개")
+    col1.metric(
+        "학습용 데이터",
+        f"{split_index:,}개"
+    )
 
     col2.metric(
         "테스트용 데이터",
@@ -496,16 +614,15 @@ elif menu == "3. 데이터 전처리":
 
 
 # ==========================================
-# 10. 모델 학습 및 성능 비교
+# 12. 모델 학습 및 성능 비교
 # ==========================================
 
-elif menu == "4. 모델 학습 및 성능 비교":
+elif menu == "6. 모델 학습 및 성능 비교":
 
     st.header("🤖 모델 학습 및 성능 비교")
 
     st.write(
-        "베이스라인과 세 가지 회귀 모델을 "
-        "동일한 조건에서 비교합니다."
+        "베이스라인과 세 가지 회귀 모델을 동일한 조건에서 비교합니다."
     )
 
     st.subheader("① 회귀 분석을 선택한 이유")
@@ -557,8 +674,8 @@ elif menu == "4. 모델 학습 및 성능 비교":
 
             with st.spinner("모델을 학습하고 있습니다..."):
 
-                result_df, predictions, y_test, X_train, X_test = (
-                    train_models(clean_df)
+                result_df, predictions, y_test = train_models(
+                    clean_df
                 )
 
                 st.session_state["result_df"] = result_df
@@ -588,58 +705,40 @@ elif menu == "4. 모델 학습 및 성능 비교":
                 hide_index=True
             )
 
-            best_mae_idx = result_df["MAE"].idxmin()
-            best_model = result_df.loc[best_mae_idx, "모델"]
-
             baseline_mae = result_df.loc[
                 result_df["모델"] == "베이스라인",
                 "MAE"
             ].iloc[0]
 
-            best_mae = result_df.loc[
-                best_mae_idx,
-                "MAE"
+            candidate_df = result_df[
+                result_df["모델"] != "베이스라인"
             ]
 
-            improvement = baseline_mae - best_mae
-
-            improvement_percent = (
-                improvement / baseline_mae * 100
-                if baseline_mae != 0
-                else 0
-            )
+            best_idx = candidate_df["MAE"].idxmin()
+            best_model = candidate_df.loc[best_idx, "모델"]
+            best_mae = candidate_df.loc[best_idx, "MAE"]
 
             st.success(
-                f"MAE가 가장 낮은 모델은 {best_model}입니다."
+                f"MAE가 가장 낮은 후보 모델은 {best_model}입니다."
             )
 
-            col1, col2, col3 = st.columns(3)
+            if best_mae < baseline_mae:
 
-            col1.metric(
-                "베이스라인 MAE",
-                f"{baseline_mae:.2f}"
-            )
-
-            col2.metric(
-                "가장 낮은 MAE",
-                f"{best_mae:.2f}"
-            )
-
-            col3.metric(
-                "베이스라인 대비 MAE 감소율",
-                f"{improvement_percent:.2f}%"
-            )
-
-            if improvement > 0:
-                st.write(
-                    f"가장 좋은 모델은 베이스라인보다 "
-                    f"MAE가 {improvement:.2f}대 낮습니다."
+                reduction = (
+                    (baseline_mae - best_mae)
+                    / baseline_mae * 100
                 )
+
+                st.write(
+                    f"베이스라인보다 MAE가 "
+                    f"{reduction:.2f}% 낮습니다."
+                )
+
             else:
+
                 st.warning(
-                    "현재 가장 좋은 후보 모델이 베이스라인보다 "
-                    "MAE가 낮지 않습니다. 입력 변수나 모델 설정을 "
-                    "추가로 검토할 필요가 있습니다."
+                    "현재 후보 모델 중 베이스라인보다 "
+                    "MAE가 낮은 모델은 없습니다."
                 )
 
             st.divider()
@@ -679,8 +778,7 @@ elif menu == "4. 모델 학습 및 성능 비교":
             )
 
             st.caption(
-                "R²는 높을수록 모델이 실제 데이터의 변화를 잘 설명합니다. "
-                "음수도 나올 수 있습니다."
+                "R²는 일반적으로 높을수록 모델이 데이터의 변화를 잘 설명합니다."
             )
 
             st.divider()
@@ -692,22 +790,15 @@ elif menu == "4. 모델 학습 및 성능 비교":
                 result_df["모델"].tolist()
             )
 
-            pred = predictions[selected_model]
-
             compare_df = pd.DataFrame({
                 "실제 대여량": y_test,
-                "예측 대여량": pred
+                "예측 대여량": predictions[selected_model]
             })
 
             fig_compare = px.line(
                 compare_df.head(100),
                 y=["실제 대여량", "예측 대여량"],
-                title=f"{selected_model} 실제값과 예측값 비교",
-                labels={
-                    "index": "테스트 데이터 순서",
-                    "value": "자전거 대여량(대)",
-                    "variable": "구분"
-                }
+                title=f"{selected_model} 실제값과 예측값 비교"
             )
 
             st.plotly_chart(
@@ -720,16 +811,12 @@ elif menu == "4. 모델 학습 및 성능 비교":
                 use_container_width=True
             )
 
-            st.caption(
-                "그래프에는 테스트 데이터 중 앞의 100개를 표시했습니다."
-            )
-
 
 # ==========================================
-# 11. 최종 결과
+# 13. 최종 결과
 # ==========================================
 
-elif menu == "5. 최종 결과":
+elif menu == "7. 최종 결과":
 
     st.header("📝 최종 결과")
 
@@ -773,11 +860,6 @@ elif menu == "5. 최종 결과":
             "MAE"
         ]
 
-        best_r2_model = candidate_df.loc[
-            candidate_df["R²"].idxmax(),
-            "모델"
-        ]
-
         st.divider()
 
         st.subheader("② 가장 좋은 모델")
@@ -816,24 +898,20 @@ elif menu == "5. 최종 결과":
                 "베이스라인보다 성능이 좋지 않습니다."
             )
 
-        st.write(
-            f"R²가 가장 높은 후보 모델은 {best_r2_model}입니다."
-        )
-
         st.divider()
 
-        st.subheader("③ 탐구 결과 해석")
+        st.subheader("③ 탐구 결과")
 
         st.write(
             "이번 탐구에서는 기온과 시간대를 입력 변수로 사용하여 "
             "공공자전거 대여량을 예측했습니다. "
-            "베이스라인과 세 가지 회귀 모델을 동일한 데이터 분할 조건에서 "
-            "비교하여 모델별 예측 성능을 확인했습니다."
+            "베이스라인과 세 가지 회귀 모델을 같은 조건에서 비교하여 "
+            "모델별 예측 성능을 확인했습니다."
         )
 
         st.write(
-            "MAE가 낮을수록 실제 대여량과 예측 대여량의 차이가 작으며, "
-            "R²가 높을수록 데이터의 변화를 잘 설명한다고 판단할 수 있습니다."
+            "MAE가 낮을수록 실제 대여량과 예측 대여량의 차이가 작고, "
+            "R²가 높을수록 모델이 데이터의 변화를 잘 설명한다고 판단할 수 있습니다."
         )
 
         st.divider()
@@ -852,7 +930,7 @@ elif menu == "5. 최종 결과":
 
 
 # ==========================================
-# 12. 사이드바
+# 14. 사이드바 하단
 # ==========================================
 
 st.sidebar.divider()
