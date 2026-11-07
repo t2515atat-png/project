@@ -3,9 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -15,12 +13,12 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
-# ==================================================
+# --------------------------------------------------
 # 1. 기본 설정
-# ==================================================
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="공공자전거 대여량 예측",
+    page_title="공공자전거 대여량 분석",
     page_icon="🚲",
     layout="wide"
 )
@@ -30,739 +28,108 @@ DATA_URL = (
     "t2515atat-png/project/main/data/SeoulBikeData.csv"
 )
 
-st.title("🚲 공공자전거 대여량 예측 프로젝트")
+TARGET = "Rented Bike Count"
+TEMP = "Temperature(°C)"
+HOUR = "Hour"
 
-st.markdown("""
-### 탐구 주제
-**기온과 시간대에 따른 공공자전거 대여량 예측**
-
-### 탐구 질문
-**기온과 시간대 정보를 활용하면 공공자전거 대여량을 얼마나 정확하게 예측할 수 있을까?**
-""")
-
-st.divider()
+st.title("🚲 기온과 시간대에 따른 공공자전거 대여량 예측")
+st.caption("기온과 시간대 정보를 활용한 데이터 분석 및 회귀 모델 비교")
 
 
-# ==================================================
-# 2. 데이터 불러오기
-# ==================================================
+# --------------------------------------------------
+# 2. 데이터 불러오기 및 정리
+# --------------------------------------------------
 
 @st.cache_data
 def load_data():
-    data = pd.read_csv(
-        DATA_URL,
-        encoding="unicode_escape"
-    )
+    encodings = ["utf-8-sig", "latin1"]
+    separators = [",", ";"]
+
+    for encoding in encodings:
+        for separator in separators:
+            try:
+                data = pd.read_csv(
+                    DATA_URL,
+                    encoding=encoding,
+                    sep=separator
+                )
+
+                if len(data.columns) > 2:
+                    break
+            except Exception:
+                continue
+        else:
+            continue
+
+        if len(data.columns) > 2:
+            break
+    else:
+        raise ValueError("데이터를 불러오지 못했습니다.")
+
     data.columns = data.columns.str.strip()
+
+    required = [TARGET, TEMP, HOUR]
+    missing = [col for col in required if col not in data.columns]
+
+    if missing:
+        raise ValueError(f"필요한 열이 없습니다: {missing}")
+
+    for col in [TARGET, TEMP, HOUR]:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    # 날짜와 시간 순서대로 정렬
+    if "Date" in data.columns:
+        data["_date_sort"] = pd.to_datetime(
+            data["Date"],
+            dayfirst=True,
+            errors="coerce"
+        )
+
+        data = data.sort_values(
+            ["_date_sort", HOUR],
+            kind="stable",
+            na_position="last"
+        )
+
+    data = data.dropna(subset=[TARGET, TEMP, HOUR])
+    data = data.reset_index(drop=True)
+
     return data
 
 
 try:
     df = load_data()
 except Exception as e:
-    st.error("데이터를 불러오지 못했습니다.")
-    st.error(str(e))
+    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
     st.stop()
 
 
-# ==================================================
-# 3. 변수 설정 및 데이터 정리
-# ==================================================
+# --------------------------------------------------
+# 3. 공통 분석 함수
+# --------------------------------------------------
 
-rental_col = "Rented Bike Count"
-temperature_col = "Temperature(°C)"
-hour_col = "Hour"
+def make_features(data, improved=False):
+    """기존 방식 또는 시간대 주기 변환 방식으로 입력 변수 생성"""
 
-required_cols = [
-    rental_col,
-    temperature_col,
-    hour_col
-]
+    temperature = data[TEMP].reset_index(drop=True)
+    hour = data[HOUR].reset_index(drop=True)
 
-missing_cols = [
-    col for col in required_cols
-    if col not in df.columns
-]
+    if improved:
+        # 24시간을 주기로 하는 사인·코사인 변환
+        return pd.DataFrame({
+            TEMP: temperature,
+            "Hour_sin": np.sin(2 * np.pi * hour / 24),
+            "Hour_cos": np.cos(2 * np.pi * hour / 24)
+        })
 
-if missing_cols:
-    st.error(f"필요한 열이 없습니다: {missing_cols}")
-    st.write("현재 데이터 열:", df.columns.tolist())
-    st.stop()
-
-
-numeric_candidates = [
-    rental_col,
-    temperature_col,
-    hour_col,
-    "Humidity(%)",
-    "Wind speed (m/s)",
-    "Visibility (10m)",
-    "Dew point temperature(°C)",
-    "Solar Radiation (MJ/m2)",
-    "Rainfall(mm)",
-    "Snowfall (cm)"
-]
-
-for col in numeric_candidates:
-    if col in df.columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
-
-
-weather_candidates = [
-    temperature_col,
-    "Humidity(%)",
-    "Wind speed (m/s)",
-    "Visibility (10m)",
-    "Dew point temperature(°C)",
-    "Solar Radiation (MJ/m2)",
-    "Rainfall(mm)",
-    "Snowfall (cm)"
-]
-
-weather_cols = [
-    col for col in weather_candidates
-    if col in df.columns
-]
-
-analysis_df = df.dropna(
-    subset=[
-        rental_col,
-        temperature_col,
-        hour_col
-    ]
-).copy()
-
-
-# ==================================================
-# 4. 사이드바 메뉴
-# ==================================================
-
-menu = st.sidebar.radio(
-    "📌 분석 메뉴",
-    [
-        "1. 데이터 소개",
-        "2. 기초통계분석",
-        "3. 기온과 시간대별 대여량 분석",
-        "4. 데이터 속성 간 관계 분석",
-        "5. 데이터 전처리",
-        "6. 모델 학습 및 성능 비교",
-        "7. 최종 결과"
-    ]
-)
-
-
-# ==================================================
-# 1. 데이터 소개
-# ==================================================
-
-if menu == "1. 데이터 소개":
-
-    st.header("📂 데이터 소개")
-
-    st.write("""
-    본 탐구에서는 서울 공공자전거 대여량 데이터를 활용합니다.
-
-    데이터에 포함된 기온과 시간대 정보를 분석하여
-    공공자전거 대여량이 어떻게 달라지는지 알아보고,
-    두 가지 정보를 활용해 대여량을 예측하고자 합니다.
-    """)
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("전체 데이터 수", f"{len(df):,}개")
-    col2.metric("전체 변수 수", f"{len(df.columns)}개")
-    col3.metric("분석에 사용하는 주요 변수", "2개")
-
-    st.subheader("데이터 미리보기")
-    st.dataframe(
-        df.head(10),
-        use_container_width=True
-    )
-
-    st.subheader("주요 변수 설명")
-
-    st.markdown("""
-    | 변수 | 의미 |
-    |---|---|
-    | Temperature(°C) | 기온 |
-    | Hour | 시간대 |
-    | Rented Bike Count | 공공자전거 대여량 |
-    """)
-
-    st.subheader("데이터 열 정보")
-
-    info_df = pd.DataFrame({
-        "열 이름": df.columns,
-        "데이터 유형": df.dtypes.astype(str).values,
-        "결측치 수": df.isnull().sum().values
+    return pd.DataFrame({
+        TEMP: temperature,
+        HOUR: hour
     })
 
-    st.dataframe(
-        info_df,
-        use_container_width=True
-    )
 
-
-# ==================================================
-# 2. 기초통계분석
-# ==================================================
-
-elif menu == "2. 기초통계분석":
-
-    st.header("📊 기초통계분석")
-
-    st.write("""
-    데이터의 평균, 중앙값, 표준편차, 최솟값, 최댓값 등을
-    확인하여 공공자전거 대여량과 기온 및 시간대의
-    전반적인 특징을 알아봅니다.
-    """)
-
-    st.subheader("① 전체 수치형 데이터의 기초통계량")
-
-    numeric_df = df.select_dtypes(
-        include=np.number
-    )
-
-    st.dataframe(
-        numeric_df.describe().T.round(2),
-        use_container_width=True
-    )
-
-    st.divider()
-
-    st.subheader("② 주요 변수의 기초통계량")
-
-    main_cols = [
-        temperature_col,
-        hour_col,
-        rental_col
-    ]
-
-    st.dataframe(
-        df[main_cols].describe().T.round(2),
-        use_container_width=True
-    )
-
-    st.divider()
-
-    st.subheader("③ 날씨 변수의 기초통계량")
-
-    if weather_cols:
-        st.dataframe(
-            df[weather_cols].describe().T.round(2),
-            use_container_width=True
-        )
-
-
-# ==================================================
-# 3. 기온과 시간대별 대여량 분석
-# ==================================================
-
-elif menu == "3. 기온과 시간대별 대여량 분석":
-
-    st.header("🌡️ 기온과 시간대별 대여량 분석")
-
-    st.write("""
-    이번 탐구에서 가장 중요하게 살펴보는 부분입니다.
-
-    어떤 기온에서 평균 대여량이 가장 많은지,
-    어떤 시간대에 평균 대여량이 가장 많은지 확인합니다.
-    """)
-
-    # ----------------------------------------------
-    # ① 기온 구간별 평균 대여량
-    # ----------------------------------------------
-
-    st.subheader("① 어떤 기온에서 대여량이 가장 많을까?")
-
-    temp_data = analysis_df[
-        [temperature_col, rental_col]
-    ].copy()
-
-    temp_bins = [
-        -np.inf, 0, 5, 10, 15, 20, 25, 30, np.inf
-    ]
-
-    temp_labels = [
-        "0℃ 미만",
-        "0~5℃",
-        "5~10℃",
-        "10~15℃",
-        "15~20℃",
-        "20~25℃",
-        "25~30℃",
-        "30℃ 이상"
-    ]
-
-    temp_data["기온 구간"] = pd.cut(
-        temp_data[temperature_col],
-        bins=temp_bins,
-        labels=temp_labels,
-        right=False
-    )
-
-    temp_avg = (
-        temp_data.groupby(
-            "기온 구간",
-            observed=False
-        )[rental_col]
-        .mean()
-        .reset_index()
-    )
-
-    temp_avg = temp_avg.dropna(
-        subset=[rental_col]
-    )
-
-    if not temp_avg.empty:
-
-        best_temp = temp_avg.loc[
-            temp_avg[rental_col].idxmax()
-        ]
-
-        st.metric(
-            "평균 대여량이 가장 많은 기온 구간",
-            str(best_temp["기온 구간"]),
-            f"평균 {best_temp[rental_col]:,.1f}대"
-        )
-
-        fig = px.bar(
-            temp_avg,
-            x="기온 구간",
-            y=rental_col,
-            text_auto=".0f",
-            title="기온 구간별 평균 공공자전거 대여량",
-            labels={
-                "기온 구간": "기온 구간",
-                rental_col: "평균 대여량"
-            }
-        )
-
-        fig.update_layout(
-            xaxis_title="기온",
-            yaxis_title="평균 대여량"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-        st.dataframe(
-            temp_avg.rename(
-                columns={rental_col: "평균 대여량"}
-            ).round(2),
-            use_container_width=True
-        )
-
-    st.info("""
-    이 결과는 각 기온 구간에 속하는 데이터의 평균 대여량을
-    비교한 것입니다. 따라서 특정 기온 한 지점의 대여량이 아니라
-    해당 기온 범위에서 나타난 평균적인 이용량을 의미합니다.
-    """)
-
-    st.divider()
-
-    # ----------------------------------------------
-    # ② 시간대별 평균 대여량
-    # ----------------------------------------------
-
-    st.subheader("② 어떤 시간대에 대여량이 가장 많을까?")
-
-    hour_data = analysis_df[
-        [hour_col, rental_col]
-    ].copy()
-
-    hour_avg = (
-        hour_data.groupby(hour_col)[rental_col]
-        .mean()
-        .reset_index()
-        .sort_values(hour_col)
-    )
-
-    if not hour_avg.empty:
-
-        best_hour = hour_avg.loc[
-            hour_avg[rental_col].idxmax()
-        ]
-
-        st.metric(
-            "평균 대여량이 가장 많은 시간대",
-            f"{int(best_hour[hour_col])}시",
-            f"평균 {best_hour[rental_col]:,.1f}대"
-        )
-
-        fig = px.bar(
-            hour_avg,
-            x=hour_col,
-            y=rental_col,
-            text_auto=".0f",
-            title="시간대별 평균 공공자전거 대여량",
-            labels={
-                hour_col: "시간대",
-                rental_col: "평균 대여량"
-            }
-        )
-
-        fig.update_layout(
-            xaxis=dict(
-                tickmode="linear",
-                dtick=1
-            ),
-            xaxis_title="시간",
-            yaxis_title="평균 대여량"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-        st.dataframe(
-            hour_avg.rename(
-                columns={rental_col: "평균 대여량"}
-            ).round(2),
-            use_container_width=True
-        )
-
-    st.divider()
-
-    # ----------------------------------------------
-    # ③ 기온과 시간대를 함께 분석
-    # ----------------------------------------------
-
-    st.subheader("③ 기온과 시간대에 따른 대여량")
-
-    heat_data = analysis_df[
-        [temperature_col, hour_col, rental_col]
-    ].copy()
-
-    heat_data["기온 구간"] = pd.cut(
-        heat_data[temperature_col],
-        bins=temp_bins,
-        labels=temp_labels,
-        right=False
-    )
-
-    heat_table = heat_data.pivot_table(
-        index="기온 구간",
-        columns=hour_col,
-        values=rental_col,
-        aggfunc="mean",
-        observed=False
-    )
-
-    fig = px.imshow(
-        heat_table,
-        text_auto=".0f",
-        aspect="auto",
-        color_continuous_scale="YlOrRd",
-        title="기온 구간과 시간대별 평균 대여량"
-    )
-
-    fig.update_layout(
-        xaxis_title="시간대",
-        yaxis_title="기온 구간"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    st.write("""
-    히트맵에서 색이 진할수록 평균 대여량이 많은 것을 의미합니다.
-    이를 통해 기온과 시간대가 함께 달라질 때 대여량이
-    어떻게 달라지는지 확인할 수 있습니다.
-    """)
-
-
-# ==================================================
-# 4. 데이터 속성 간 관계 분석
-# ==================================================
-
-elif menu == "4. 데이터 속성 간 관계 분석":
-
-    st.header("🔍 데이터 속성 간 관계 분석")
-
-    st.write("""
-    기온, 습도, 풍속 등의 날씨 변수와 시간대가
-    공공자전거 대여량과 어떤 관계를 가지는지 살펴봅니다.
-    """)
-
-    st.subheader("① 변수 간 상관관계")
-
-    corr_cols = list(dict.fromkeys(
-        weather_cols + [hour_col, rental_col]
-    ))
-
-    corr_data = df[corr_cols].apply(
-        pd.to_numeric,
-        errors="coerce"
-    )
-
-    corr_matrix = corr_data.corr()
-
-    fig = px.imshow(
-        corr_matrix,
-        text_auto=".2f",
-        color_continuous_scale="RdBu",
-        zmin=-1,
-        zmax=1,
-        title="변수 간 상관관계"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    st.write("""
-    상관계수는 두 변수 사이의 선형적인 관계를 나타냅니다.
-    1에 가까우면 양의 상관관계, -1에 가까우면 음의 상관관계,
-    0에 가까우면 선형적인 관계가 약하다는 의미입니다.
-    상관관계가 있다고 해서 인과관계가 성립하는 것은 아닙니다.
-    """)
-
-    st.divider()
-
-    st.subheader("② 선택한 날씨 변수와 대여량의 관계")
-
-    selected_weather = st.selectbox(
-        "날씨 변수를 선택하세요.",
-        weather_cols
-    )
-
-    weather_data = df[
-        [selected_weather, rental_col]
-    ].dropna()
-
-    fig = px.scatter(
-        weather_data,
-        x=selected_weather,
-        y=rental_col,
-        opacity=0.4,
-        title=f"{selected_weather}와 대여량의 관계"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    weather_corr = weather_data[
-        selected_weather
-    ].corr(weather_data[rental_col])
-
-    st.metric(
-        "선택한 변수와 대여량의 상관계수",
-        f"{weather_corr:.3f}"
-    )
-
-    st.divider()
-
-    st.subheader("③ 기온과 시간대의 관계")
-
-    fig = px.scatter(
-        analysis_df,
-        x=temperature_col,
-        y=rental_col,
-        color=hour_col,
-        opacity=0.5,
-        title="기온과 대여량의 관계 (시간대별 구분)"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-
-# ==================================================
-# 5. 데이터 전처리
-# ==================================================
-
-elif menu == "5. 데이터 전처리":
-
-    st.header("🧹 데이터 전처리")
-
-    st.write("""
-    예측 모델에 사용할 기온과 시간대 데이터를 확인하고,
-    결측치와 이상치를 살펴봅니다.
-    """)
-
-    st.subheader("① 결측치 확인")
-
-    missing_df = pd.DataFrame({
-        "변수": df.columns,
-        "결측치 수": df.isnull().sum().values
-    })
-
-    st.dataframe(
-        missing_df,
-        use_container_width=True
-    )
-
-    st.divider()
-
-    st.subheader("② 예측에 사용할 변수")
-
-    st.write("""
-    - 입력 변수: 기온, 시간대
-    - 예측 대상: 공공자전거 대여량
-    """)
-
-    model_data = df[
-        [temperature_col, hour_col, rental_col]
-    ].copy()
-
-    model_data = model_data.replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
-
-    st.write(
-        "전처리 전 데이터 수:",
-        f"{len(model_data):,}개"
-    )
-
-    model_data = model_data.dropna()
-
-    st.write(
-        "결측치 제거 후 데이터 수:",
-        f"{len(model_data):,}개"
-    )
-
-    st.divider()
-
-    st.subheader("③ 대여량 이상치 확인")
-
-    fig = px.box(
-        model_data,
-        y=rental_col,
-        title="공공자전거 대여량 상자그림"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    st.write("""
-    상자그림에서 일반적인 범위를 벗어난 값이 나타날 수 있습니다.
-    하지만 실제 이용량이 많았던 시간대일 가능성도 있으므로
-    이상치라는 이유만으로 무조건 제거하지 않습니다.
-    """)
-
-    st.divider()
-
-    st.subheader("④ 최종 전처리 데이터")
-
-    st.dataframe(
-        model_data.head(10),
-        use_container_width=True
-    )
-
-
-# ==================================================
-# 6. 모델 학습 및 성능 비교
-# ==================================================
-
-elif menu == "6. 모델 학습 및 성능 비교":
-
-    st.header("🤖 모델 학습 및 성능 비교")
-
-    st.write("""
-    기온과 시간대 정보를 입력 변수로 사용하여
-    공공자전거 대여량을 예측합니다.
-
-    베이스라인과 세 가지 회귀 모델의 성능을 비교합니다.
-    """)
-
-    model_data = df[
-        [temperature_col, hour_col, rental_col]
-    ].copy()
-
-    model_data = model_data.replace(
-        [np.inf, -np.inf],
-        np.nan
-    ).dropna()
-
-    if len(model_data) < 10:
-        st.error("모델 학습에 필요한 데이터가 부족합니다.")
-        st.stop()
-
-    X = model_data[
-        [temperature_col, hour_col]
-    ]
-
-    y = model_data[rental_col]
-
-    # 학습 데이터와 테스트 데이터 분리
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=42
-    )
-
-    st.subheader("① 학습 데이터와 테스트 데이터")
-
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "학습 데이터",
-        f"{len(X_train):,}개"
-    )
-
-    col2.metric(
-        "테스트 데이터",
-        f"{len(X_test):,}개"
-    )
-
-    st.write("""
-    전체 데이터를 학습 데이터 80%, 테스트 데이터 20%로 나누었습니다.
-    학습 데이터로 모델을 학습하고, 테스트 데이터로
-    예측 성능을 확인합니다.
-    """)
-
-    st.divider()
-
-    # ----------------------------------------------
-    # 베이스라인
-    # ----------------------------------------------
-
-    st.subheader("② 베이스라인 모델")
-
-    baseline_value = y_train.mean()
-
-    baseline_pred = np.full(
-        len(y_test),
-        baseline_value
-    )
-
-    st.write(
-        f"베이스라인은 학습 데이터의 평균 대여량인 "
-        f"**{baseline_value:.1f}대**를 모든 테스트 데이터의 "
-        "예측값으로 사용합니다."
-    )
-
-    st.write("""
-    베이스라인은 복잡한 모델을 사용하지 않았을 때의
-    기본적인 예측 성능을 확인하기 위한 기준입니다.
-    다른 모델의 성능이 이 기준보다 좋아지는지 비교합니다.
-    """)
-
-    st.divider()
-
-    # ----------------------------------------------
-    # 모델 학습
-    # ----------------------------------------------
-
-    st.subheader("③ 회귀 모델 학습")
+def make_models():
+    """비교할 회귀 모델 생성"""
 
     models = {
         "선형 회귀": Pipeline([
@@ -790,258 +157,800 @@ elif menu == "6. 모델 학습 및 성능 비교":
         ])
     }
 
+    return models
+
+
+@st.cache_data(show_spinner=False)
+def evaluate_models(data, improved=False):
+    """시간 순서대로 80:20 분할 후 모델 평가"""
+
+    X = make_features(data, improved)
+    y = data[TARGET].reset_index(drop=True)
+
+    split_index = int(len(data) * 0.8)
+
+    X_train = X.iloc[:split_index]
+    X_test = X.iloc[split_index:]
+
+    y_train = y.iloc[:split_index]
+    y_test = y.iloc[split_index:]
+
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise ValueError("학습 데이터 또는 테스트 데이터가 부족합니다.")
+
     results = []
     predictions = {}
 
-    # 베이스라인 평가
-    results.append({
-        "모델": "베이스라인",
-        "MAE": mean_absolute_error(y_test, baseline_pred),
-        "RMSE": np.sqrt(
-            mean_squared_error(y_test, baseline_pred)
-        ),
-        "결정계수(R²)": r2_score(y_test, baseline_pred)
-    })
+    # 베이스라인: 학습 데이터의 평균값으로 예측
+    baseline_pred = np.full(
+        len(y_test),
+        y_train.mean()
+    )
 
     predictions["베이스라인"] = baseline_pred
 
-    progress = st.progress(0)
+    results.append({
+        "모델": "베이스라인",
+        "MAE": mean_absolute_error(y_test, baseline_pred),
+        "RMSE": np.sqrt(mean_squared_error(y_test, baseline_pred)),
+        "R²": r2_score(y_test, baseline_pred)
+    })
 
-    for i, (name, model) in enumerate(models.items()):
-
+    # 세 가지 회귀 모델 학습
+    for name, model in make_models().items():
         model.fit(X_train, y_train)
-
         pred = model.predict(X_test)
-
-        mae = mean_absolute_error(
-            y_test,
-            pred
-        )
-
-        rmse = np.sqrt(
-            mean_squared_error(y_test, pred)
-        )
-
-        r2 = r2_score(
-            y_test,
-            pred
-        )
-
-        results.append({
-            "모델": name,
-            "MAE": mae,
-            "RMSE": rmse,
-            "결정계수(R²)": r2
-        })
 
         predictions[name] = pred
 
-        progress.progress((i + 1) / len(models))
+        results.append({
+            "모델": name,
+            "MAE": mean_absolute_error(y_test, pred),
+            "RMSE": np.sqrt(mean_squared_error(y_test, pred)),
+            "R²": r2_score(y_test, pred)
+        })
 
     result_df = pd.DataFrame(results)
 
-    st.success("모델 학습이 완료되었습니다.")
+    return result_df, predictions, y_test.reset_index(drop=True)
 
-    st.divider()
 
-    # ----------------------------------------------
-    # 성능 비교
-    # ----------------------------------------------
-
-    st.subheader("④ 모델별 성능 비교")
-
+def show_result_table(result_df):
     st.dataframe(
-        result_df.round(3),
+        result_df.style.format({
+            "MAE": "{:.2f}",
+            "RMSE": "{:.2f}",
+            "R²": "{:.4f}"
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# 기존 방식과 개선 방식을 각각 평가
+try:
+    original_results, original_predictions, y_test = evaluate_models(
+        df, improved=False
+    )
+
+    improved_results, improved_predictions, improved_y_test = evaluate_models(
+        df, improved=True
+    )
+except Exception as e:
+    st.error(f"모델을 학습하는 중 오류가 발생했습니다: {e}")
+    st.stop()
+
+
+# --------------------------------------------------
+# 4. 메뉴
+# --------------------------------------------------
+
+menu = st.sidebar.radio(
+    "📂 탐구 메뉴",
+    [
+        "데이터 소개",
+        "기초통계분석",
+        "기온과 시간대별 대여량 분석",
+        "데이터 속성 간 관계 분석",
+        "데이터 전처리",
+        "모델 학습 및 성능 비교",
+        "성능 개선",
+        "최종 결과"
+    ]
+)
+
+
+# --------------------------------------------------
+# 5. 데이터 소개
+# --------------------------------------------------
+
+if menu == "데이터 소개":
+
+    st.header("📊 데이터 소개")
+
+    st.write(
+        "서울 공공자전거 대여 데이터를 활용하여 "
+        "기온과 시간대에 따른 대여량의 특징을 분석하고 "
+        "대여량을 예측하였다."
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("전체 데이터 수", f"{len(df):,}개")
+    col2.metric("전체 변수 수", f"{len(df.columns)}개")
+    col3.metric("예측 대상", "대여량")
+
+    st.subheader("데이터 미리보기")
+    st.dataframe(df.drop(columns=["_date_sort"], errors="ignore").head(10),
+                 use_container_width=True)
+
+    st.subheader("주요 변수")
+
+    variable_info = pd.DataFrame({
+        "변수": [TEMP, HOUR, TARGET],
+        "설명": [
+            "공공자전거 대여 시점의 기온",
+            "공공자전거 대여 시점의 시간",
+            "공공자전거 대여량"
+        ],
+        "역할": ["입력 변수", "입력 변수", "예측 대상"]
+    })
+
+    st.table(variable_info)
+
+    st.info(
+        "이번 예측 모델은 기온과 시간대 두 가지 정보를 입력받아 "
+        "공공자전거 대여량을 예측한다."
+    )
+
+    st.caption(f"데이터 출처: {DATA_URL}")
+
+
+# --------------------------------------------------
+# 6. 기초통계분석
+# --------------------------------------------------
+
+elif menu == "기초통계분석":
+
+    st.header("📈 기초통계분석")
+
+    st.write(
+        "데이터의 전체적인 특징을 파악하기 위해 "
+        "평균, 표준편차, 최솟값, 최댓값 등을 확인하였다."
+    )
+
+    numeric_df = df.select_dtypes(include=np.number)
+
+    st.subheader("기초통계량")
+    st.dataframe(
+        numeric_df.describe().T.style.format("{:.2f}"),
         use_container_width=True
     )
 
-    st.write("""
-    **평가지표 설명**
+    col1, col2, col3 = st.columns(3)
 
-    - **MAE:** 실제 대여량과 예측 대여량의 평균적인 차이입니다.
-      낮을수록 좋습니다.
-    - **RMSE:** 예측 오차가 큰 경우 더 큰 영향을 주는 지표입니다.
-      낮을수록 좋습니다.
-    - **결정계수(R²):** 모델이 실제 대여량의 변화를 얼마나 설명하는지
-      나타냅니다. 일반적으로 높을수록 좋습니다.
-    """)
+    col1.metric("평균 대여량", f"{df[TARGET].mean():,.1f}대")
+    col2.metric("최대 대여량", f"{df[TARGET].max():,.0f}대")
+    col3.metric("최소 대여량", f"{df[TARGET].min():,.0f}대")
 
-    st.divider()
+    st.subheader("대여량 분포")
 
-    st.subheader("⑤ MAE 비교")
+    fig = px.histogram(
+        df,
+        x=TARGET,
+        nbins=40,
+        title="공공자전거 대여량 분포"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("기온 분포")
+
+    fig = px.histogram(
+        df,
+        x=TEMP,
+        nbins=30,
+        title="기온 분포"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# --------------------------------------------------
+# 7. 기온과 시간대별 대여량 분석
+# --------------------------------------------------
+
+elif menu == "기온과 시간대별 대여량 분석":
+
+    st.header("🌡️ 기온과 시간대별 대여량 분석")
+
+    st.write(
+        "기온 구간과 시간대에 따라 공공자전거 평균 대여량이 "
+        "어떻게 달라지는지 분석하였다."
+    )
+
+    # 기온 구간 설정
+    bins = [-np.inf, 0, 5, 10, 15, 20, 25, 30, np.inf]
+    labels = [
+        "0℃ 미만",
+        "0~5℃",
+        "5~10℃",
+        "10~15℃",
+        "15~20℃",
+        "20~25℃",
+        "25~30℃",
+        "30℃ 이상"
+    ]
+
+    temp_data = df.copy()
+
+    temp_data["기온 구간"] = pd.cut(
+        temp_data[TEMP],
+        bins=bins,
+        labels=labels,
+        right=False
+    )
+
+    temp_avg = (
+        temp_data.groupby("기온 구간", observed=False)[TARGET]
+        .mean()
+        .reset_index()
+    )
+
+    st.subheader("① 기온 구간별 평균 대여량")
 
     fig = px.bar(
-        result_df,
+        temp_avg,
+        x="기온 구간",
+        y=TARGET,
+        text_auto=".0f",
+        title="기온 구간별 평균 공공자전거 대여량"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    best_temp = temp_avg.loc[temp_avg[TARGET].idxmax()]
+
+    st.metric(
+        "평균 대여량이 가장 많은 기온 구간",
+        str(best_temp["기온 구간"]),
+        f"{best_temp[TARGET]:,.1f}대"
+    )
+
+    st.subheader("② 시간대별 평균 대여량")
+
+    hour_avg = (
+        df.groupby(HOUR)[TARGET]
+        .mean()
+        .reset_index()
+        .sort_values(HOUR)
+    )
+
+    fig = px.line(
+        hour_avg,
+        x=HOUR,
+        y=TARGET,
+        markers=True,
+        title="시간대별 평균 공공자전거 대여량"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    best_hour = hour_avg.loc[hour_avg[TARGET].idxmax()]
+
+    st.metric(
+        "평균 대여량이 가장 많은 시간대",
+        f"{int(best_hour[HOUR])}시",
+        f"{best_hour[TARGET]:,.1f}대"
+    )
+
+    st.subheader("③ 기온과 시간대에 따른 평균 대여량")
+
+    pivot = temp_data.pivot_table(
+        index="기온 구간",
+        columns=HOUR,
+        values=TARGET,
+        aggfunc="mean",
+        observed=False
+    )
+
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        color_continuous_scale="YlOrRd",
+        labels={
+            "x": "시간대",
+            "y": "기온 구간",
+            "color": "평균 대여량"
+        },
+        title="기온과 시간대에 따른 평균 대여량 히트맵"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# --------------------------------------------------
+# 8. 데이터 속성 간 관계 분석
+# --------------------------------------------------
+
+elif menu == "데이터 속성 간 관계 분석":
+
+    st.header("🔗 데이터 속성 간 관계 분석")
+
+    st.write(
+        "수치형 변수 사이의 상관관계를 확인하여 "
+        "각 변수들이 서로 어떤 관계를 가지는지 분석하였다."
+    )
+
+    numeric_df = df.select_dtypes(include=np.number)
+    corr = numeric_df.corr()
+
+    st.subheader("상관관계 히트맵")
+
+    fig = px.imshow(
+        corr,
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        zmin=-1,
+        zmax=1,
+        title="수치형 변수 간 상관관계"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("기온과 대여량의 관계")
+
+    fig = px.scatter(
+        df,
+        x=TEMP,
+        y=TARGET,
+        opacity=0.3,
+        title="기온과 공공자전거 대여량의 관계"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.metric(
+        "기온과 대여량의 상관계수",
+        f"{df[TEMP].corr(df[TARGET]):.3f}"
+    )
+
+    st.subheader("시간대와 대여량의 관계")
+
+    fig = px.scatter(
+        df,
+        x=HOUR,
+        y=TARGET,
+        opacity=0.3,
+        title="시간대와 공공자전거 대여량의 관계"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.metric(
+        "시간대와 대여량의 상관계수",
+        f"{df[HOUR].corr(df[TARGET]):.3f}"
+    )
+
+    st.caption(
+        "상관관계는 두 변수의 관련성을 나타내며, "
+        "한 변수가 다른 변수의 원인이라는 뜻은 아니다."
+    )
+
+
+# --------------------------------------------------
+# 9. 데이터 전처리
+# --------------------------------------------------
+
+elif menu == "데이터 전처리":
+
+    st.header("🧹 데이터 전처리")
+
+    st.write(
+        "모델 학습에 앞서 결측치, 중복 데이터, "
+        "이상치 및 불필요한 변수를 확인하였다."
+    )
+
+    st.subheader("① 결측치 확인")
+
+    missing = df.isnull().sum()
+
+    missing_df = pd.DataFrame({
+        "변수": missing.index,
+        "결측치 수": missing.values
+    })
+
+    st.dataframe(missing_df, use_container_width=True)
+
+    st.subheader("② 중복 데이터 확인")
+
+    duplicate_count = df.duplicated().sum()
+
+    st.metric("중복 데이터 수", f"{duplicate_count:,}개")
+
+    st.subheader("③ 이상치 확인")
+
+    outlier_rows = []
+
+    for col in [TEMP, TARGET]:
+        q1 = df[col].quantile(0.25)
+        q3 = df[col].quantile(0.75)
+        iqr = q3 - q1
+
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+
+        count = ((df[col] < lower) | (df[col] > upper)).sum()
+
+        outlier_rows.append({
+            "변수": col,
+            "하한": lower,
+            "상한": upper,
+            "IQR 기준 이상치 수": count
+        })
+
+    st.dataframe(
+        pd.DataFrame(outlier_rows).style.format({
+            "하한": "{:.2f}",
+            "상한": "{:.2f}"
+        }),
+        use_container_width=True
+    )
+
+    st.info(
+        "IQR 기준으로 이상치가 확인되더라도 실제 기온이나 "
+        "이용량의 특수한 상황일 수 있으므로 무조건 삭제하지 않았다. "
+        "측정 오류라고 판단할 근거가 부족한 값은 유지하였다."
+    )
+
+    st.subheader("④ 불필요한 변수 확인")
+
+    st.write(
+        "Functioning Day 변수는 모든 값이 Yes로 동일하므로 "
+        "이번 분석에서 구분 정보를 제공하지 않아 모델 입력에서 제외하였다."
+    )
+
+    st.write(
+        "Date는 데이터의 시간 순서를 정렬하는 데 사용하고, "
+        "모델의 입력 변수에는 포함하지 않았다."
+    )
+
+    st.success(
+        "최종 모델 입력 변수: 기온과 시간대 / 예측 대상: 대여량"
+    )
+
+
+# --------------------------------------------------
+# 10. 모델 학습 및 성능 비교
+# --------------------------------------------------
+
+elif menu == "모델 학습 및 성능 비교":
+
+    st.header("🤖 모델 학습 및 성능 비교")
+
+    st.write(
+        "기온과 시간대를 입력 변수로 사용하여 "
+        "공공자전거 대여량을 예측하는 회귀 모델을 학습하였다."
+    )
+
+    st.subheader("① 학습 방법")
+
+    st.write(
+        f"전체 {len(df):,}개 데이터를 시간 순서대로 정렬한 뒤 "
+        "앞의 80%는 학습 데이터, 뒤의 20%는 테스트 데이터로 사용하였다."
+    )
+
+    st.write("입력 변수: 기온, 시간대")
+    st.write("예측 대상: 공공자전거 대여량")
+
+    st.subheader("② 모델별 성능 비교")
+
+    show_result_table(original_results)
+
+    st.caption(
+        "MAE와 RMSE는 낮을수록 좋고, R²는 높을수록 좋다."
+    )
+
+    st.subheader("③ MAE 비교")
+
+    fig = px.bar(
+        original_results,
         x="모델",
         y="MAE",
         text_auto=".2f",
-        title="모델별 평균 절대 오차 비교"
+        title="기존 모델의 MAE 비교"
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-
-    st.subheader("⑥ 결정계수(R²) 비교")
+    st.subheader("④ R² 비교")
 
     fig = px.bar(
-        result_df,
+        original_results,
         x="모델",
-        y="결정계수(R²)",
+        y="R²",
         text_auto=".3f",
-        title="모델별 결정계수 비교"
+        title="기존 모델의 R² 비교"
     )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
+    best_original = original_results.loc[
+        original_results["MAE"].idxmin()
+    ]
 
-    st.subheader("⑦ 실제 대여량과 예측 대여량 비교")
-
-    selected_model = st.selectbox(
-        "비교할 모델을 선택하세요.",
-        list(predictions.keys())
-    )
-
-    comparison_df = pd.DataFrame({
-        "실제 대여량": y_test.values,
-        "예측 대여량": predictions[selected_model]
-    })
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            y=comparison_df["실제 대여량"],
-            mode="lines",
-            name="실제 대여량"
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            y=comparison_df["예측 대여량"],
-            mode="lines",
-            name="예측 대여량"
-        )
-    )
-
-    fig.update_layout(
-        title=f"{selected_model} 실제값과 예측값 비교",
-        xaxis_title="테스트 데이터 순서",
-        yaxis_title="공공자전거 대여량"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-    st.dataframe(
-        comparison_df.head(20).round(2),
-        use_container_width=True
-    )
-
-    st.divider()
-
-    # ----------------------------------------------
-    # 최종 모델 선택
-    # ----------------------------------------------
-
-    st.subheader("⑧ 가장 좋은 성능의 모델")
-
-    best_idx = result_df["MAE"].idxmin()
-    best_result = result_df.loc[best_idx]
+    st.subheader("⑤ 기존 모델의 최종 결과")
 
     st.metric(
-        "MAE 기준 가장 낮은 오차를 보인 모델",
-        best_result["모델"]
+        "MAE 기준 가장 좋은 모델",
+        best_original["모델"],
+        f"MAE {best_original['MAE']:.2f}"
     )
 
     st.write(
-        f"MAE: {best_result['MAE']:.2f}"
+        "MAE가 가장 낮은 모델을 테스트 데이터에서 "
+        "평균적인 예측 오차가 가장 작은 모델로 판단하였다."
+    )
+
+    st.subheader("⑥ 실제값과 예측값 비교")
+
+    selected_model = st.selectbox(
+        "비교할 모델 선택",
+        list(original_predictions.keys())
+    )
+
+    comparison = pd.DataFrame({
+        "실제 대여량": y_test,
+        "예측 대여량": original_predictions[selected_model]
+    })
+
+    fig = px.scatter(
+        comparison,
+        x="실제 대여량",
+        y="예측 대여량",
+        title=f"{selected_model}: 실제값과 예측값 비교"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# --------------------------------------------------
+# 11. 성능 개선
+# --------------------------------------------------
+
+elif menu == "성능 개선":
+
+    st.header("🚀 성능 개선")
+
+    st.write(
+        "기존 모델은 시간대를 0~23의 숫자로 사용하였다. "
+        "하지만 시간은 24시간을 주기로 반복되므로 "
+        "23시와 0시가 서로 가까운 시간이라는 특성을 반영할 필요가 있다."
+    )
+
+    st.subheader("① 개선 방법: 시간대의 주기적 변환")
+
+    st.write("기존 입력 변수")
+    st.code("Temperature(°C), Hour")
+
+    st.write("개선된 입력 변수")
+    st.code(
+        "Temperature(°C), "
+        "Hour_sin = sin(2π × Hour / 24), "
+        "Hour_cos = cos(2π × Hour / 24)"
+    )
+
+    st.info(
+        "시간대를 사인과 코사인으로 변환하여 "
+        "하루 24시간이 반복되는 특성을 모델에 반영하였다."
+    )
+
+    st.subheader("② 개선 전후 모델 성능")
+
+    st.write("기존 모델 성능")
+    show_result_table(original_results)
+
+    st.write("개선 모델 성능")
+    show_result_table(improved_results)
+
+    st.subheader("③ MAE 개선 전후 비교")
+
+    mae_comparison = pd.DataFrame({
+        "모델": original_results["모델"],
+        "기존 MAE": original_results["MAE"],
+        "개선 후 MAE": improved_results["MAE"]
+    })
+
+    mae_chart = mae_comparison.melt(
+        id_vars="모델",
+        var_name="구분",
+        value_name="MAE"
+    )
+
+    fig = px.bar(
+        mae_chart,
+        x="모델",
+        y="MAE",
+        color="구분",
+        barmode="group",
+        title="모델별 개선 전후 MAE 비교",
+        text_auto=".2f"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("④ 개선 결과 비교표")
+
+    comparison_rows = []
+
+    for _, old_row in original_results.iterrows():
+        new_row = improved_results[
+            improved_results["모델"] == old_row["모델"]
+        ].iloc[0]
+
+        mae_change = (
+            (old_row["MAE"] - new_row["MAE"])
+            / old_row["MAE"] * 100
+            if old_row["MAE"] != 0 else 0
+        )
+
+        comparison_rows.append({
+            "모델": old_row["모델"],
+            "기존 MAE": old_row["MAE"],
+            "개선 후 MAE": new_row["MAE"],
+            "MAE 개선율(%)": mae_change,
+            "기존 R²": old_row["R²"],
+            "개선 후 R²": new_row["R²"]
+        })
+
+    comparison_df = pd.DataFrame(comparison_rows)
+
+    st.dataframe(
+        comparison_df.style.format({
+            "기존 MAE": "{:.2f}",
+            "개선 후 MAE": "{:.2f}",
+            "MAE 개선율(%)": "{:.2f}",
+            "기존 R²": "{:.4f}",
+            "개선 후 R²": "{:.4f}"
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.caption(
+        "MAE 개선율이 양수이면 기존보다 오차가 감소한 것이고, "
+        "음수이면 오차가 증가한 것이다."
+    )
+
+    st.subheader("⑤ 성능 개선 결과 해석")
+
+    best_improved = improved_results.loc[
+        improved_results["MAE"].idxmin()
+    ]
+
+    st.metric(
+        "개선 후 MAE 기준 가장 좋은 모델",
+        best_improved["모델"],
+        f"MAE {best_improved['MAE']:.2f}"
+    )
+
+    best_old_mae = original_results.set_index("모델")["MAE"]
+    best_new_mae = improved_results.set_index("모델")["MAE"]
+
+    changed_models = []
+
+    for model_name in best_old_mae.index:
+        old_value = best_old_mae[model_name]
+        new_value = best_new_mae[model_name]
+
+        if new_value < old_value:
+            changed_models.append(f"{model_name}: 오차 감소")
+        elif new_value > old_value:
+            changed_models.append(f"{model_name}: 오차 증가")
+        else:
+            changed_models.append(f"{model_name}: 변화 없음")
+
+    for item in changed_models:
+        st.write("• " + item)
+
+    st.warning(
+        "시간대 변환이 모든 모델의 성능을 향상시키는 것은 아니다. "
+        "실제 MAE, RMSE, R² 결과를 바탕으로 개선 여부를 판단해야 한다."
+    )
+
+
+# --------------------------------------------------
+# 12. 최종 결과
+# --------------------------------------------------
+
+elif menu == "최종 결과":
+
+    st.header("🏁 최종 결과")
+
+    st.subheader("① 기온과 시간대에 따른 대여량")
+
+    bins = [-np.inf, 0, 5, 10, 15, 20, 25, 30, np.inf]
+    labels = [
+        "0℃ 미만", "0~5℃", "5~10℃", "10~15℃",
+        "15~20℃", "20~25℃", "25~30℃", "30℃ 이상"
+    ]
+
+    temp_data = df.copy()
+
+    temp_data["기온 구간"] = pd.cut(
+        temp_data[TEMP],
+        bins=bins,
+        labels=labels,
+        right=False
+    )
+
+    temp_avg = (
+        temp_data.groupby("기온 구간", observed=False)[TARGET]
+        .mean()
+        .reset_index()
+    )
+
+    hour_avg = (
+        df.groupby(HOUR)[TARGET]
+        .mean()
+        .reset_index()
+    )
+
+    best_temp = temp_avg.loc[temp_avg[TARGET].idxmax()]
+    best_hour = hour_avg.loc[hour_avg[TARGET].idxmax()]
+
+    col1, col2 = st.columns(2)
+
+    col1.metric(
+        "대여량이 가장 많은 기온 구간",
+        str(best_temp["기온 구간"])
+    )
+
+    col2.metric(
+        "대여량이 가장 많은 시간대",
+        f"{int(best_hour[HOUR])}시"
+    )
+
+    st.subheader("② 기존 모델과 개선 모델 비교")
+
+    show_result_table(original_results)
+
+    st.write("시간대 주기 변환을 적용한 모델")
+    show_result_table(improved_results)
+
+    best_final = improved_results.loc[
+        improved_results["MAE"].idxmin()
+    ]
+
+    st.subheader("③ 최종 예측 모델")
+
+    st.metric(
+        "개선 후 MAE 기준 최종 모델",
+        best_final["모델"],
+        f"MAE {best_final['MAE']:.2f}"
     )
 
     st.write(
-        f"RMSE: {best_result['RMSE']:.2f}"
+        f"개선된 입력 변수를 사용했을 때 MAE가 가장 낮은 모델은 "
+        f"{best_final['모델']}이다. "
+        "다만 성능 개선 여부는 기존 모델의 결과와 함께 비교하여 "
+        "판단해야 한다."
     )
+
+    st.subheader("④ 느낀점")
 
     st.write(
-        f"결정계수(R²): {best_result['결정계수(R²)']:.3f}"
+        "기온과 시간대에 따라 공공자전거 대여량이 달라지는 것을 확인하고, "
+        "여러 회귀 모델의 성능을 비교하면서 데이터 분석에서 "
+        "모델의 선택과 평가 조건이 중요하다는 것을 느꼈다."
     )
 
-    st.info("""
-    MAE가 가장 낮은 모델을 평균적인 예측 오차가 가장 작은 모델로
-    판단했습니다. 결정계수와 RMSE도 함께 확인하여
-    모델의 성능을 종합적으로 비교할 수 있습니다.
-    """)
+    st.subheader("⑤ 탐구의 한계")
 
-
-# ==================================================
-# 7. 최종 결과
-# ==================================================
-
-elif menu == "7. 최종 결과":
-
-    st.header("📝 최종 결과")
-
-    st.subheader("탐구 주제")
-
-    st.markdown("""
-    **기온과 시간대에 따른 공공자전거 대여량 예측**
-    """)
-
-    st.subheader("탐구 질문")
-
-    st.markdown("""
-    **기온과 시간대 정보를 활용하면 공공자전거 대여량을
-    얼마나 정확하게 예측할 수 있을까?**
-    """)
-
-    st.divider()
-
-    st.subheader("탐구 과정")
-
-    st.markdown("""
-    1. 공공자전거 대여량 데이터를 수집하였다.
-    2. 기초통계분석으로 데이터의 특징을 확인하였다.
-    3. 기온별 평균 대여량과 시간대별 평균 대여량을 비교하였다.
-    4. 기온과 시간대에 따른 대여량의 관계를 시각화하였다.
-    5. 기온과 시간대 데이터를 이용하여 회귀 모델을 학습하였다.
-    6. 베이스라인과 세 가지 회귀 모델의 예측 성능을 비교하였다.
-    """)
-
-    st.divider()
-
-    st.subheader("탐구를 통해 확인할 내용")
-
-    st.markdown("""
-    - 평균 대여량이 가장 높은 기온 구간은 어디인가?
-    - 평균 대여량이 가장 높은 시간대는 언제인가?
-    - 기온과 시간대에 따라 대여량은 어떻게 달라지는가?
-    - 어떤 회귀 모델이 가장 작은 예측 오차를 보이는가?
-    """)
-
-    st.divider()
-
-    st.subheader("탐구의 한계")
-
-    st.write("""
-    이번 예측에서는 기온과 시간대 두 가지 변수만 사용하였습니다.
-    따라서 습도, 강수량, 계절, 휴일 등 다른 요인은
-    예측에 반영되지 않았습니다.
-
-    또한 데이터에 나타난 관계가 모든 상황에서 동일하게
-    나타난다고 단정할 수는 없습니다.
-    """)
-
-    st.info("""
-    실제 탐구 결론은 3번 메뉴에서 확인한 기온별·시간대별 대여량과
-    6번 메뉴에서 확인한 모델별 성능 결과를 바탕으로 작성합니다.
-    """)
+    st.write(
+        "이번 탐구에서는 기온과 시간대만을 이용하여 대여량을 예측했기 때문에 "
+        "강수량, 습도, 계절 등 다른 요인의 영향을 충분히 반영하지 못했다. "
+        "또한 시간대 변환이 모든 모델의 성능을 향상시키는 것은 아니므로 "
+        "다른 입력 변수와 전처리 방법을 추가로 비교할 필요가 있다."
+    )
